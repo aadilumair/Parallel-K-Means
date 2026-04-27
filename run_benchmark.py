@@ -95,12 +95,56 @@ class SystemInfo:
         d["sockets"]          = sh("lscpu | grep '^Socket(s)' | awk '{print $2}'")
         d["threads_per_core"] = sh("lscpu | grep 'Thread(s) per core' | awk '{print $NF}'")
         d["cpu_mhz"]          = sh("grep 'cpu MHz' /proc/cpuinfo | head -1 | awk '{print $4}'")
-        d["cpu_max_mhz"]      = sh("lscpu | grep 'CPU max MHz' | awk '{print $NF}'")
-        d["cpu_min_mhz"]      = sh("lscpu | grep 'CPU min MHz' | awk '{print $NF}'")
-        d["cache_l1d"]        = sh("lscpu | grep 'L1d cache' | awk '{print $NF}'")
-        d["cache_l1i"]        = sh("lscpu | grep 'L1i cache' | awk '{print $NF}'")
-        d["cache_l2"]         = sh("lscpu | grep 'L2 cache' | awk '{print $NF}'")
-        d["cache_l3"]         = sh("lscpu | grep 'L3 cache' | awk '{print $NF}'")
+
+        # lscpu on Intel hybrid CPUs outputs e.g. "2611.200 MHz" or is blank —
+        # fall back to /proc/cpuinfo-based max across all cores.
+        def _lscpu_mhz(field: str) -> str:
+            """Extract numeric MHz value from lscpu field (handles multi-instance output)."""
+            raw = sh(f"lscpu | grep '{field}' | head -1")
+            m = re.search(r"([\d.]+)\s*MHz", raw)
+            return m.group(1) if m else ""
+
+        def _lscpu_cache(field: str) -> str:
+            """
+            Extract cache size from lscpu field.
+            Handles both '384 KiB' and '16x48K (16 instances)' formats.
+            Returns a clean string like '48K' or '384 KiB' or '' if not found.
+            """
+            raw = sh(f"lscpu | grep -i '{field}' | head -1")
+            if not raw:
+                return ""
+            # Format: "16x48K (16 instances)" — grab the size per instance (after 'x')
+            m = re.search(r"\d+x(\S+)", raw)
+            if m:
+                return m.group(1)
+            # Format: "384 KiB" or "24 MiB"
+            m = re.search(r"([\d.]+\s*[KMG]i?B)", raw)
+            if m:
+                return m.group(1)
+            # Format: plain number like "32768"
+            m = re.search(r"([\d]+)", raw.split(":")[-1])
+            return m.group(1) + " K" if m else ""
+
+        cpu_max = _lscpu_mhz("CPU max MHz")
+        if not cpu_max:
+            # Hybrid CPUs (e.g. i5-13420H) don't expose max MHz in lscpu;
+            # use the highest observed frequency across all cores from /proc/cpuinfo.
+            cpu_max = sh(
+                "grep 'cpu MHz' /proc/cpuinfo | awk '{print $4}' | sort -rn | head -1"
+            )
+        d["cpu_max_mhz"] = cpu_max
+
+        cpu_min = _lscpu_mhz("CPU min MHz")
+        if not cpu_min:
+            cpu_min = sh(
+                "grep 'cpu MHz' /proc/cpuinfo | awk '{print $4}' | sort -n | head -1"
+            )
+        d["cpu_min_mhz"] = cpu_min
+
+        d["cache_l1d"]        = _lscpu_cache("L1d cache")
+        d["cache_l1i"]        = _lscpu_cache("L1i cache")
+        d["cache_l2"]         = _lscpu_cache("L2 cache")
+        d["cache_l3"]         = _lscpu_cache("L3 cache")
         d["flags_avx"]        = "yes" if "avx" in sh("grep flags /proc/cpuinfo | head -1") else "no"
         d["flags_avx2"]       = "yes" if "avx2" in sh("grep flags /proc/cpuinfo | head -1") else "no"
         d["flags_sse4"]       = "yes" if "sse4" in sh("grep flags /proc/cpuinfo | head -1") else "no"
@@ -280,8 +324,13 @@ class CppBenchmark:
         path = os.path.join(self.working, name)
         t0   = time.monotonic()
         # Run from /tmp to avoid NTFS issues with data.txt written by draw_chart_gnu()
-        out  = sh(f"cd /tmp && '{path}' 2>&1", timeout=900)
+        raw  = sh(f"cd /tmp && '{path}' 2>&1", timeout=900)
         wall = time.monotonic() - t0
+        # Strip spurious "gnuplot: Permission denied" lines (Windows gnuplot.exe in PATH)
+        out = "\n".join(
+            line for line in raw.splitlines()
+            if not ("gnuplot" in line.lower() and "permission denied" in line.lower())
+        )
         return out, wall
 
     # ── Parse timing from C++ stdout ──────────────────────────────────────────
@@ -537,9 +586,8 @@ class ReportWriter:
         a(f"1. [System Information](#system-information)")
         a(f"2. [Build Results](#build-results)")
         a(f"3. [Benchmark Results](#benchmark-results)")
-        a(f"4. [Performance Analysis](#performance-analysis)")
-        a(f"5. [Gnuplot Chart](#gnuplot-chart)")
-        a(f"6. [Raw Program Output](#raw-program-output)")
+        a(f"4. [Comparison Chart](#comparison-chart)")
+        a(f"5. [Raw Program Output](#raw-program-output)")
         a(f"")
         a(f"---")
         a(f"")
@@ -640,39 +688,10 @@ class ReportWriter:
             a(f"```")
         a(f"")
 
-        # Storage
-        stor_d = self.sys.get("storage", {})
-        a(f"### Storage")
-        a(f"")
-        a(f"**Linux Filesystems (`df -h`):**")
-        a(f"```")
-        a(stor_d.get("df_human", "N/A"))
-        a(f"```")
-        a(f"")
-        if stor_d.get("windows_drives") and stor_d["windows_drives"] != "N/A":
-            a(f"**Windows Drives (via /mnt/):**")
-            a(f"```")
-            a(stor_d["windows_drives"])
-            a(f"```")
-        a(f"")
-
-        # Environment
-        env_d = self.sys.get("environment", {})
-        a(f"### Environment & Tools")
-        a(f"")
-        tools = env_d.get("tools", {})
-        if tools:
-            a(self._table(["Tool", "Version"], [[k, v] for k, v in tools.items()]))
-        a(f"")
-        env_vars = env_d.get("env", {})
-        a(f"**Key Environment Variables:**")
-        a(f"```")
-        for k, v in env_vars.items():
-            a(f"{k}={v}")
-        a(f"```")
-        a(f"")
         a(f"---")
         a(f"")
+
+
 
         # ── 2. Build Results ──────────────────────────────────────────────────
         a(f"## Build Results")
@@ -723,68 +742,8 @@ class ReportWriter:
         a(f"---")
         a(f"")
 
-        # ── 4. Performance Analysis ───────────────────────────────────────────
-        a(f"## Performance Analysis")
-        a(f"")
-        seq_t  = st.get("total_time_s")
-        par_t  = pt.get("total_time_s")
-        n_proc = pt.get("num_processors") or 1
-
-        if seq_t and par_t and par_t > 0:
-            speedup   = seq_t / par_t
-            reduction = (seq_t - par_t) / seq_t * 100
-            efficiency = speedup / n_proc * 100
-
-            a(f"| Metric | Value |")
-            a(f"|--------|-------|")
-            a(f"| Sequential Total Time | `{seq_t:.4f} s` |")
-            a(f"| Parallel Total Time   | `{par_t:.4f} s` |")
-            a(f"| **Speedup**           | **`{speedup:.4f}x`** |")
-            a(f"| Time Reduction        | `{reduction:.2f}%` |")
-            a(f"| OMP Threads           | `{n_proc}` |")
-            a(f"| Parallel Efficiency   | `{efficiency:.1f}%` |")
-            a(f"")
-            a(f"### OpenMP Parallelisation Analysis")
-            a(f"")
-            if speedup >= n_proc * 0.85:
-                a(f"**Excellent.** The parallel version achieves a **{speedup:.2f}x speedup** "
-                  f"on {n_proc} logical processors — {efficiency:.0f}% parallel efficiency. "
-                  f"This near-linear scaling confirms that `compute_distance()` is effectively "
-                  f"embarrassingly parallel; overhead from the `#pragma omp critical` section "
-                  f"in cluster updates is negligible at this dataset size.")
-            elif speedup >= 1.5:
-                a(f"**Good.** Speedup of **{speedup:.2f}x** on {n_proc} threads yields "
-                  f"{efficiency:.0f}% parallel efficiency. The `critical` section in "
-                  f"`compute_distance()` introduces contention that limits perfect scaling.")
-            else:
-                a(f"**Modest.** Speedup of **{speedup:.2f}x**. WSL2 virtualisation overhead "
-                  f"and NUMA effects may be reducing performance. "
-                  f"Consider larger datasets for better parallel scalability.")
-
-            a(f"")
-            a(f"### Amdahl's Law Estimate")
-            a(f"")
-            if n_proc > 1:
-                # Amdahl: S = 1 / ((1-p) + p/n)  → solve for p
-                # speedup = 1 / ((1-p) + p/n)
-                # Rearrange: p = (1/speedup - 1) / (1/n - 1)
-                try:
-                    p = (1/speedup - 1) / (1/n_proc - 1)
-                    p = max(0.0, min(1.0, p))
-                    theoretical_max = 1 / (1 - p) if p < 1 else float("inf")
-                    a(f"Based on the observed speedup and thread count, approximately "
-                      f"**{p*100:.1f}%** of the workload is parallel. "
-                      f"Amdahl's theoretical maximum speedup (infinite cores) ≈ **{theoretical_max:.1f}x**.")
-                except Exception:
-                    pass
-        else:
-            a(f"_Timing data unavailable — binaries may not have run._")
-        a(f"")
-        a(f"---")
-        a(f"")
-
-        # ── 5. Gnuplot Chart ──────────────────────────────────────────────────
-        a(f"## Gnuplot Chart")
+        # ── 4. Chart ─────────────────────────────────────────────────────────
+        a(f"## Comparison Chart")
         a(f"")
         png = self.bench.get("gnuplot_png")
         if png and os.path.exists(png):
@@ -792,7 +751,7 @@ class ReportWriter:
             a(f"")
             a(f"![K-Means Sequential vs Parallel Speedup](./speedup_comparison.png)")
         else:
-            a(f"_Gnuplot chart was not generated._")
+            a(f"_Chart was not generated._")
             a(f"")
             a(f"Install gnuplot and re-run: `sudo apt-get install -y gnuplot`")
         a(f"")
