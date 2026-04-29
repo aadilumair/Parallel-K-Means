@@ -10,7 +10,7 @@ using namespace std;
 using namespace std::chrono;
 
 double max_range = 100000;
-int num_point = 500000;
+int num_point = 5000000;
 int num_cluster = 20;
 int max_iterations = 20;
 
@@ -155,11 +155,11 @@ void compute_distance(vector<Point> &points, vector<Cluster> &clusters){
 }
 
 double euclidean_dist(Point point, Cluster cluster){
-
-    double distance = sqrt(pow(point.get_x_coord() - cluster.get_x_coord(),2) +
-                           pow(point.get_y_coord() - cluster.get_y_coord(), 2));
-
-    return distance;
+    // Optimized: Replaced pow() with simple multiplication
+    double dx = point.get_x_coord() - cluster.get_x_coord();
+    double dy = point.get_y_coord() - cluster.get_y_coord();
+    
+    return sqrt((dx * dx) + (dy * dy));
 }
 
 //For each cluster, update the coords. If only one cluster moves, conv will be TRUE
