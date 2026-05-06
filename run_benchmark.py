@@ -360,28 +360,40 @@ class CppBenchmark:
         return t
 
     # ── Gnuplot PNG ───────────────────────────────────────────────────────────
-    def _gnuplot(self, seq_t: float, par_t: float,
+    def _gnuplot(self, seq_t: float, par_t: float, par_imp_t: float,
                  points: int, clusters: int) -> str | None:
-        if seq_t is None or par_t is None:
+        times = {"Sequential": seq_t, "Parallel": par_t, "Parallel Improved": par_imp_t}
+        valid = {k: v for k, v in times.items() if v is not None}
+        if len(valid) < 2:
             return None
 
-        speedup  = seq_t / par_t if par_t > 0 else 0
         png_path = os.path.join(self.working, "speedup_comparison.png")
         dat_path = os.path.join(self.working, "timing_data.dat")
         gnu_path = os.path.join(self.working, "plot_script.gnu")
 
-        # Data file
         with open(dat_path, "w") as f:
             f.write("# label time\n")
-            f.write(f"'Sequential' {seq_t:.6f}\n")
-            f.write(f"'Parallel'   {par_t:.6f}\n")
+            for label, t in times.items():
+                f.write(f"'{label}' {t:.6f}\n" if t is not None else f"'{label}' 0\n")
 
-        ymax = max(seq_t, par_t) * 1.4
-        yoff = max(seq_t, par_t) * 0.05
+        ymax = max(v for v in times.values() if v) * 1.45
+        yoff = max(v for v in times.values() if v) * 0.05
+        sp_par     = seq_t / par_t     if (par_t     and par_t > 0     and seq_t) else 0
+        sp_imp     = seq_t / par_imp_t if (par_imp_t and par_imp_t > 0 and seq_t) else 0
 
-        script = f"""set terminal png size 1000,650 enhanced font 'Helvetica,13'
+        label_lines = ""
+        for idx, (label, t) in enumerate(times.items()):
+            if t is not None:
+                label_lines += f"set label {idx+1} sprintf('%.3f s', {t:.4f}) at first {idx}, first {t:.4f}+{yoff:.4f} center font ',11' textcolor rgb '#1a1a2e'\n"
+
+        speedup_txt = ""
+        if sp_par:  speedup_txt += f"Par: {sp_par:.2f}x  "
+        if sp_imp:  speedup_txt += f"Improved: {sp_imp:.2f}x"
+        mid = (len(times) - 1) / 2.0
+
+        script = f"""set terminal png size 1100,680 enhanced font 'Helvetica,13'
 set output '{png_path}'
-set title 'K-Means: Sequential vs Parallel Total Time\\n({points:,} points, {clusters} clusters)' font ',15'
+set title 'K-Means: Sequential vs Parallel vs Parallel Improved\\n({points:,} points, {clusters} clusters)' font ',15'
 set ylabel 'Time (seconds)'
 set xlabel 'Version'
 set yrange [0:{ymax:.4f}]
@@ -391,12 +403,11 @@ set style data histograms
 set style histogram cluster gap 3
 set style fill solid 0.85 border -1
 set boxwidth 0.6
-set xtics rotate by 0
-set label 1 sprintf('%.3f s', {seq_t:.4f}) at first 0, first {seq_t:.4f}+{yoff:.4f} center font ',12' textcolor rgb '#1a1a2e'
-set label 2 sprintf('%.3f s', {par_t:.4f}) at first 1, first {par_t:.4f}+{yoff:.4f} center font ',12' textcolor rgb '#1a1a2e'
-set label 3 sprintf('Speedup: {speedup:.2f}x', {speedup:.2f}) at first 0.5, {ymax*0.88:.4f} center font ',14' textcolor rgb '#c0392b'
-plot '{dat_path}' using 2:xtic(1) lc rgb '#2980b9' notitle, \
-     '' using 2 lc rgb '#e74c3c' notitle
+set xtics rotate by 15
+{label_lines}set label {len(times)+1} '{speedup_txt}' at first {mid:.1f}, {ymax*0.90:.4f} center font ',13' textcolor rgb '#c0392b'
+plot '{dat_path}' using 2:xtic(1) lc rgb '#2980b9' notitle, \\
+     '' using 2 lc rgb '#e74c3c' notitle, \\
+     '' using 2 lc rgb '#27ae60' notitle
 """
         with open(gnu_path, "w") as f:
             f.write(script)
@@ -411,8 +422,9 @@ plot '{dat_path}' using 2:xtic(1) lc rgb '#2980b9' notitle, \
     # ── Main ──────────────────────────────────────────────────────────────────
     def run(self) -> dict:
         result = {
-            "sequential": {"compile_ok": False, "compile_log": "", "output": "", "timing": {}, "wall_time": 0},
-            "parallel"  : {"compile_ok": False, "compile_log": "", "output": "", "timing": {}, "wall_time": 0},
+            "sequential"        : {"compile_ok": False, "compile_log": "", "output": "", "timing": {}, "wall_time": 0},
+            "parallel"          : {"compile_ok": False, "compile_log": "", "output": "", "timing": {}, "wall_time": 0},
+            "parallel_improved" : {"compile_ok": False, "compile_log": "", "output": "", "timing": {}, "wall_time": 0},
             "gnuplot_png": None,
         }
 
@@ -437,6 +449,13 @@ plot '{dat_path}' using 2:xtic(1) lc rgb '#2980b9' notitle, \
         result["parallel"]["compile_log"] = log2
         print(f"  {'✓ Success' if ok2 else '✗ FAILED'}" + (f": {log2}" if not ok2 else ""))
 
+        # ── Compile parallel improved
+        subheader("Compiling main_parallel_improved.cpp")
+        ok3, log3 = self._compile("main_parallel_improved.cpp", "kmeans_parallel_improved")
+        result["parallel_improved"]["compile_ok"]  = ok3
+        result["parallel_improved"]["compile_log"] = log3
+        print(f"  {'✓ Success' if ok3 else '✗ FAILED'}" + (f": {log3}" if not ok3 else ""))
+
         # ── Run sequential
         if result["sequential"]["compile_ok"]:
             subheader("Running Sequential K-Means (500,000 pts × 20 clusters × 20 iters)")
@@ -459,10 +478,22 @@ plot '{dat_path}' using 2:xtic(1) lc rgb '#2980b9' notitle, \
             print(out2)
             print(f"\n  ⏱  Wall clock: {wall2:.2f} s")
 
+        # ── Run parallel improved
+        if result["parallel_improved"]["compile_ok"]:
+            subheader("Running Parallel Improved K-Means (500,000 pts × 20 clusters × 20 iters)")
+            print("  Please wait — this may take ~5–20 seconds…")
+            out3, wall3 = self._run_binary("kmeans_parallel_improved")
+            result["parallel_improved"]["output"]    = out3
+            result["parallel_improved"]["wall_time"] = wall3
+            result["parallel_improved"]["timing"]    = self._parse(out3)
+            print(out3)
+            print(f"\n  ⏱  Wall clock: {wall3:.2f} s")
+
         # ── Chart generation (gnuplot → matplotlib fallback)
         subheader("Generating Comparison Chart")
         st   = result["sequential"]["timing"].get("total_time_s")
         pt   = result["parallel"]["timing"].get("total_time_s")
+        pit  = result["parallel_improved"]["timing"].get("total_time_s")
         pts  = result["sequential"]["timing"].get("num_points") or 500000
         clus = result["sequential"]["timing"].get("num_clusters") or 20
 
@@ -470,10 +501,10 @@ plot '{dat_path}' using 2:xtic(1) lc rgb '#2980b9' notitle, \
         gnuplot_bin = sh("which gnuplot 2>/dev/null")
         if gnuplot_bin:
             print(f"  Using gnuplot at {gnuplot_bin}", flush=True)
-            png = self._gnuplot(st, pt, pts, clus)
+            png = self._gnuplot(st, pt, pit, pts, clus)
         else:
             print("  gnuplot not found — using matplotlib fallback", flush=True)
-            png = self._matplotlib_chart(st, pt, pts, clus)
+            png = self._matplotlib_chart(st, pt, pit, pts, clus)
 
         result["gnuplot_png"] = png
         if png:
@@ -484,27 +515,27 @@ plot '{dat_path}' using 2:xtic(1) lc rgb '#2980b9' notitle, \
         return result
 
     # ── Matplotlib fallback chart ─────────────────────────────────────────────
-    def _matplotlib_chart(self, seq_t, par_t, points: int, clusters: int):
-        if seq_t is None or par_t is None:
+    def _matplotlib_chart(self, seq_t, par_t, par_imp_t, points: int, clusters: int):
+        available = [(l, v) for l, v in [("Sequential", seq_t), ("Parallel", par_t), ("Parallel\nImproved", par_imp_t)] if v is not None]
+        if len(available) < 2:
             return None
         try:
-            import importlib, numpy as np
+            import importlib
             mpl = importlib.import_module("matplotlib")
             mpl.use("Agg")
             plt = importlib.import_module("matplotlib.pyplot")
 
-            speedup  = seq_t / par_t if par_t > 0 else 0
             png_path = os.path.join(self.working, "speedup_comparison.png")
 
-            fig, ax = plt.subplots(figsize=(10, 6.5))
+            cats   = [l for l, _ in available]
+            values = [v for _, v in available]
+            colors = ["#2980b9", "#e74c3c", "#27ae60"]
+
+            fig, ax = plt.subplots(figsize=(11, 6.5))
             fig.patch.set_facecolor("#f8f9fa")
             ax.set_facecolor("#ffffff")
 
-            cats   = ["Sequential", "Parallel"]
-            values = [seq_t, par_t]
-            colors = ["#2980b9", "#e74c3c"]
-
-            bars = ax.bar(cats, values, color=colors, width=0.45,
+            bars = ax.bar(cats, values, color=colors[:len(cats)], width=0.45,
                           edgecolor="white", linewidth=1.5, zorder=3)
 
             for bar, val in zip(bars, values):
@@ -512,21 +543,26 @@ plot '{dat_path}' using 2:xtic(1) lc rgb '#2980b9' notitle, \
                         val + max(values) * 0.02,
                         f"{val:.3f} s",
                         ha="center", va="bottom",
-                        fontsize=13, fontweight="bold", color="#1a1a2e")
+                        fontsize=12, fontweight="bold", color="#1a1a2e")
 
-            ax.text(0.5, 0.92,
-                    f"Speedup: {speedup:.2f}×",
-                    transform=ax.transAxes,
-                    ha="center", fontsize=14, color="#c0392b", fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.3",
-                              facecolor="#fff3f3", edgecolor="#e74c3c", alpha=0.8))
+            speedup_parts = []
+            if seq_t and par_t and par_t > 0:
+                speedup_parts.append(f"Par: {seq_t/par_t:.2f}×")
+            if seq_t and par_imp_t and par_imp_t > 0:
+                speedup_parts.append(f"Improved: {seq_t/par_imp_t:.2f}×")
+            if speedup_parts:
+                ax.text(0.5, 0.93, "  ".join(speedup_parts),
+                        transform=ax.transAxes,
+                        ha="center", fontsize=13, color="#c0392b", fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.3",
+                                  facecolor="#fff3f3", edgecolor="#e74c3c", alpha=0.8))
 
             ax.set_ylabel("Time (seconds)", fontsize=12)
             ax.set_title(
-                f"K-Means: Sequential vs Parallel Total Time\n"
+                f"K-Means: Sequential vs Parallel vs Parallel Improved\n"
                 f"({points:,} pts, {clusters} clusters, 20 iterations)",
                 fontsize=14, fontweight="bold", pad=12)
-            ax.set_ylim(0, max(values) * 1.35)
+            ax.set_ylim(0, max(values) * 1.38)
             ax.grid(axis="y", linestyle="--", alpha=0.5, zorder=0)
             ax.spines[["top", "right"]].set_visible(False)
 
@@ -696,18 +732,21 @@ class ReportWriter:
         # ── 2. Build Results ──────────────────────────────────────────────────
         a(f"## Build Results")
         a(f"")
-        seq = self.bench.get("sequential", {})
-        par = self.bench.get("parallel",   {})
+        seq = self.bench.get("sequential",        {})
+        par = self.bench.get("parallel",          {})
+        pim = self.bench.get("parallel_improved", {})
 
         def badge(ok): return "✅ Success" if ok else "❌ Failed"
 
         a(self._table(
             ["Source File", "Status", "Compiler Notes"],
             [
-                ["main_sequential.cpp", badge(seq.get("compile_ok")),
+                ["main_sequential.cpp",       badge(seq.get("compile_ok")),
                  (seq.get("compile_log") or "Clean compile").strip()[:120]],
-                ["main_parallel.cpp",   badge(par.get("compile_ok")),
+                ["main_parallel.cpp",          badge(par.get("compile_ok")),
                  (par.get("compile_log") or "Clean compile").strip()[:120]],
+                ["main_parallel_improved.cpp", badge(pim.get("compile_ok")),
+                 (pim.get("compile_log") or "Clean compile").strip()[:120]],
             ]
         ))
         a(f"")
@@ -719,23 +758,30 @@ class ReportWriter:
         # ── 3. Benchmark Results ──────────────────────────────────────────────
         a(f"## Benchmark Results")
         a(f"")
-        st = seq.get("timing", {})
-        pt = par.get("timing", {})
+        st  = seq.get("timing", {})
+        pt  = par.get("timing", {})
+        pit = pim.get("timing", {})
 
         def fmt(v, suffix=""): return f"{v}{suffix}" if v is not None else "N/A"
 
+        def speedup_vs_seq(t_val):
+            s = st.get("total_time_s")
+            return f"{s/t_val:.2f}x" if (s and t_val) else "N/A"
+
         a(self._table(
-            ["Metric", "Sequential", "Parallel"],
+            ["Metric", "Sequential", "Parallel", "Parallel Improved"],
             [
-                ["Points",             fmt(st.get("num_points")),    fmt(pt.get("num_points"))],
-                ["Clusters",           fmt(st.get("num_clusters")),  fmt(pt.get("num_clusters"))],
-                ["Iterations",         fmt(st.get("num_iterations")),fmt(pt.get("num_iterations"))],
-                ["OMP Processors",     "1 (sequential)",             fmt(pt.get("num_processors"))],
-                ["Init Time (s)",      fmt(st.get("init_time_s")),   fmt(pt.get("init_time_s"))],
+                ["Points",             fmt(st.get("num_points")),     fmt(pt.get("num_points")),     fmt(pit.get("num_points"))],
+                ["Clusters",           fmt(st.get("num_clusters")),   fmt(pt.get("num_clusters")),   fmt(pit.get("num_clusters"))],
+                ["Iterations",         fmt(st.get("num_iterations")), fmt(pt.get("num_iterations")), fmt(pit.get("num_iterations"))],
+                ["OMP Processors",     "1 (sequential)",              fmt(pt.get("num_processors")), fmt(pit.get("num_processors"))],
+                ["Init Time (s)",      fmt(st.get("init_time_s")),    fmt(pt.get("init_time_s")),    fmt(pit.get("init_time_s"))],
                 ["**Total Time (s)**", f"**{fmt(st.get('total_time_s'))}**",
-                                       f"**{fmt(pt.get('total_time_s'))}**"],
-                ["Iter Time (s)",      fmt(st.get("iter_time_s")),   fmt(pt.get("iter_time_s"))],
-                ["Wall Time (s)",      f"{seq.get('wall_time', 0):.2f}", f"{par.get('wall_time', 0):.2f}"],
+                                       f"**{fmt(pt.get('total_time_s'))}**",
+                                       f"**{fmt(pit.get('total_time_s'))}**"],
+                ["Iter Time (s)",      fmt(st.get("iter_time_s")),    fmt(pt.get("iter_time_s")),    fmt(pit.get("iter_time_s"))],
+                ["Wall Time (s)",      f"{seq.get('wall_time',0):.2f}", f"{par.get('wall_time',0):.2f}", f"{pim.get('wall_time',0):.2f}"],
+                ["Speedup vs Seq",     "1.00x",  speedup_vs_seq(pt.get("total_time_s")),  speedup_vs_seq(pit.get("total_time_s"))],
             ]
         ))
         a(f"")
@@ -749,7 +795,7 @@ class ReportWriter:
         if png and os.path.exists(png):
             a(f"Chart saved to: `{png}`")
             a(f"")
-            a(f"![K-Means Sequential vs Parallel Speedup](./speedup_comparison.png)")
+            a(f"![K-Means Sequential vs Parallel vs Parallel Improved](./speedup_comparison.png)")
         else:
             a(f"_Chart was not generated._")
             a(f"")
@@ -769,6 +815,11 @@ class ReportWriter:
         a(f"### Parallel (`main_parallel.cpp`)")
         a(f"```")
         a(par.get("output") or "(no output)")
+        a(f"```")
+        a(f"")
+        a(f"### Parallel Improved (`main_parallel_improved.cpp`)")
+        a(f"```")
+        a(pim.get("output") or "(no output)")
         a(f"```")
         a(f"")
         a(f"---")
@@ -824,10 +875,13 @@ def main():
     print(f"  Report  : {REPORT_OUT}")
     if bench_result.get("gnuplot_png"):
         print(f"  Chart   : {bench_result['gnuplot_png']}")
-    seq_t = bench_result.get("sequential", {}).get("timing", {}).get("total_time_s")
-    par_t = bench_result.get("parallel",   {}).get("timing", {}).get("total_time_s")
+    seq_t = bench_result.get("sequential",        {}).get("timing", {}).get("total_time_s")
+    par_t = bench_result.get("parallel",          {}).get("timing", {}).get("total_time_s")
+    pit_t = bench_result.get("parallel_improved", {}).get("timing", {}).get("total_time_s")
     if seq_t and par_t and par_t > 0:
-        print(f"  Speedup : {seq_t/par_t:.4f}x  ({seq_t:.2f} s → {par_t:.2f} s)")
+        print(f"  Speedup (Parallel)          : {seq_t/par_t:.4f}x  ({seq_t:.2f} s → {par_t:.2f} s)")
+    if seq_t and pit_t and pit_t > 0:
+        print(f"  Speedup (Parallel Improved) : {seq_t/pit_t:.4f}x  ({seq_t:.2f} s → {pit_t:.2f} s)")
     print(f"{'='*70}\n")
 
 
