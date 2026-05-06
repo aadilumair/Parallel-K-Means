@@ -5,6 +5,7 @@
 #include "Point.h"
 #include "Cluster.h"
 #include <omp.h>
+#include <immintrin.h>
 
 using namespace std;
 using namespace std::chrono;
@@ -128,8 +129,16 @@ vector<Cluster> init_cluster(int num_cluster) {
 
 void compute_distance(vector<Point> &points, vector<Cluster> &clusters) {
 
-    unsigned long points_size   = points.size();
-    unsigned long clusters_size = clusters.size();
+    int points_size   = (int)points.size();
+    int clusters_size = (int)clusters.size();
+
+    // Pre-extract cluster coordinates as floats for AVX2 vectorization
+    vector<float> cx(clusters_size);
+    vector<float> cy(clusters_size);
+    for (int c = 0; c < clusters_size; ++c) {
+        cx[c] = (float)clusters[c].get_x_coord();
+        cy[c] = (float)clusters[c].get_y_coord();
+    }
 
 #pragma omp parallel
     {
@@ -138,28 +147,61 @@ void compute_distance(vector<Point> &points, vector<Cluster> &clusters) {
         vector<double> thr_sum_y(clusters_size, 0.0);
         vector<int>    thr_count(clusters_size, 0);
 
-        double min_distance;
-        int    min_index;
-
-        // nowait: threads that finish their chunk proceed straight to the
-        // critical merge without waiting for slower threads, overlapping
-        // the merge cost with remaining work.
-// FIX 5: schedule(guided) with nowait — same hybrid-aware reasoning;
         // nowait lets fast threads proceed to the critical merge immediately.
+// FIX 6: AVX2 Intrinsics (_mm256_sub_ps / _mm256_mul_ps) for distance calculation
 #pragma omp for schedule(guided) nowait
-        for (int i = 0; i < (int)points_size; i++) {
+        for (int i = 0; i < points_size; i++) {
 
             Point &point = points[i];
+            float px = (float)point.get_x_coord();
+            float py = (float)point.get_y_coord();
 
-            min_distance = euclidean_dist(point, clusters[0]);
-            min_index    = 0;
+            // Broadcast the point's coordinates to all 8 slots of the AVX2 registers
+            __m256 v_px = _mm256_set1_ps(px);
+            __m256 v_py = _mm256_set1_ps(py);
 
-            for (int j = 1; j < (int)clusters_size; j++) {
+            float min_distance = 1e30f;
+            int   min_index    = -1;
 
-                double distance = euclidean_dist(point, clusters[j]);
+            int j = 0;
+            // Process 8 clusters at a time using 256-bit AVX2 vectors
+            for (; j <= clusters_size - 8; j += 8) {
+                // Load 8 cluster X and Y coordinates (unaligned load)
+                __m256 v_cx = _mm256_loadu_ps(&cx[j]);
+                __m256 v_cy = _mm256_loadu_ps(&cy[j]);
 
-                if (distance < min_distance) {
-                    min_distance = distance;
+                // Compute differences: dx = px - cx, dy = py - cy
+                __m256 v_dx = _mm256_sub_ps(v_px, v_cx);
+                __m256 v_dy = _mm256_sub_ps(v_py, v_cy);
+
+                // Compute squared differences: dx^2, dy^2
+                __m256 v_dx2 = _mm256_mul_ps(v_dx, v_dx);
+                __m256 v_dy2 = _mm256_mul_ps(v_dy, v_dy);
+
+                // Sum the squared differences to get the squared distance
+                __m256 v_dist2 = _mm256_add_ps(v_dx2, v_dy2);
+
+                // Extract distances back to memory to find the minimum in this block
+                // (Squared distance is fine for finding the nearest cluster, no sqrt needed)
+                float dists[8];
+                _mm256_storeu_ps(dists, v_dist2);
+
+                for (int k = 0; k < 8; ++k) {
+                    if (dists[k] < min_distance) {
+                        min_distance = dists[k];
+                        min_index    = j + k;
+                    }
+                }
+            }
+
+            // Handle any remaining clusters (if clusters_size is not a multiple of 8)
+            for (; j < clusters_size; ++j) {
+                float dx = px - cx[j];
+                float dy = py - cy[j];
+                float dist2 = dx * dx + dy * dy;
+
+                if (dist2 < min_distance) {
+                    min_distance = dist2;
                     min_index    = j;
                 }
             }
@@ -176,7 +218,7 @@ void compute_distance(vector<Point> &points, vector<Cluster> &clusters) {
         // add_batch() has no atomics; the critical directive is sufficient.
 #pragma omp critical
         {
-            for (int c = 0; c < (int)clusters_size; c++) {
+            for (int c = 0; c < clusters_size; c++) {
                 if (thr_count[c] > 0) {
                     clusters[c].add_batch(thr_sum_x[c], thr_sum_y[c], thr_count[c]);
                 }

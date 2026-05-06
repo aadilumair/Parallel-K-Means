@@ -176,6 +176,20 @@ No atomics are needed here because `add_batch` is only ever called from inside a
 Speedup 5.2623x
 ---
 
+## Fix 6 — AVX2 Intrinsics Vectorization (`_mm256_sub_ps` / `_mm256_mul_ps`)
+
+### Problem
+Calculating the distance between each point and every cluster requires multiple subtractions, multiplications, and an addition inside the tightest inner loop. In standard C++, the compiler might not autovectorize this optimally, leading to scalar execution where only one dimension of one cluster is processed per instruction.
+
+### Fix
+Manually implemented vectorization using **AVX2 Intrinsics**, which are supported efficiently on both Performance (P) and Efficiency (E) cores on modern hybrid chips (where AVX-512 is often disabled).
+
+- Coordinates are first cast and packed into contiguous arrays of `float`.
+- The inner loop computes squared differences (`dx^2`, `dy^2`) and sums them for **8 clusters simultaneously** using 256-bit SIMD registers.
+- Finding the nearest cluster is done by extracting the 8 computed distances and finding the minimum. The `sqrt` was omitted because comparing squared distances guarantees the same minimum, yielding further optimization.
+
+---
+
 ## Summary of All Changes
 
 | # | Location | Change | Root Problem Fixed |
@@ -186,4 +200,5 @@ Speedup 5.2623x
 | 4 | `compute_distance()` | Thread-local reduction + `omp critical` merge | 1.5M atomics / iteration |
 | 5 | `compute_distance()` | `nowait` on `omp for` | Unnecessary barrier stall |
 | 6 | `init_point()` / `compute_distance()` | `schedule(guided)` | Load imbalance on P/E hybrid architectures |
-| 7 | `Cluster.h` | `add_batch()` without atomics | Supports Fix 4 |
+| 7 | `compute_distance()` | AVX2 Intrinsics (`_mm256_sub_ps`) | Scalar computation bottlenecks in inner loop |
+| 8 | `Cluster.h` | `add_batch()` without atomics | Supports Fix 4 |
