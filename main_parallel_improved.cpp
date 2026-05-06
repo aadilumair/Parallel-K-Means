@@ -92,7 +92,7 @@ vector<Point> init_point(int num_point) {
         // deterministic per-thread and there is no contention on rand().
         unsigned int seed = (unsigned int)omp_get_thread_num();
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (int i = 0; i < num_point; i++) {
             points[i] = Point(rand_r(&seed) % (int)max_range,
                               rand_r(&seed) % (int)max_range);
@@ -144,7 +144,9 @@ void compute_distance(vector<Point> &points, vector<Cluster> &clusters) {
         // nowait: threads that finish their chunk proceed straight to the
         // critical merge without waiting for slower threads, overlapping
         // the merge cost with remaining work.
-#pragma omp for schedule(static) nowait
+// FIX 5: schedule(guided) with nowait — same hybrid-aware reasoning;
+        // nowait lets fast threads proceed to the critical merge immediately.
+#pragma omp for schedule(guided) nowait
         for (int i = 0; i < (int)points_size; i++) {
 
             Point &point = points[i];

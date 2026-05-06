@@ -132,13 +132,28 @@ Reduction in synchronisation operations: **~3 000×**.
 ## Fix 4 — Added `nowait` to the Inner `omp for`
 
 ```cpp
-#pragma omp for schedule(static) nowait
+#pragma omp for schedule(guided) nowait
 ```
 
 Without `nowait`, all threads block at an implicit barrier after the loop before
 proceeding. With `nowait`, threads that finish their chunk early can immediately
 enter the `critical` merge section, overlapping the merge cost with the remaining
 work of slower threads.
+
+
+2.7437x speedup
+---
+
+## Fix 5 — Hybrid-Aware Load Balancing (`schedule(guided)`)
+
+### Problem
+Static scheduling (`schedule(static)`) divides iterations equally among threads. On modern hybrid architectures (like Intel P-cores and E-cores, or Apple Silicon P/E cores), this causes fast P-cores to finish their chunks early and idle while waiting for slower E-cores to finish their equally-sized chunks.
+
+### Fix
+Using `schedule(guided)` dynamically assigns chunks to threads. The chunk size starts large (reducing scheduling overhead) and exponentially decreases. This ensures that:
+1. Fast P-cores claim more of the larger chunks early on.
+2. Slower E-cores work on smaller chunks.
+3. As the loop nears completion, the chunks are small enough that fast threads can "steal" remaining work if slow threads are lagging behind, drastically reducing overall wait time.
 
 ---
 
@@ -157,6 +172,8 @@ void add_batch(double sum_x, double sum_y, int count) {
 No atomics are needed here because `add_batch` is only ever called from inside a
 `#pragma omp critical` section, which already provides mutual exclusion.
 
+
+Speedup 5.2623x
 ---
 
 ## Summary of All Changes
@@ -168,4 +185,5 @@ No atomics are needed here because `add_batch` is only ever called from inside a
 | 3 | `init_point()` / `init_cluster()` | Direct construction, no `new` | Memory leak + malloc lock contention |
 | 4 | `compute_distance()` | Thread-local reduction + `omp critical` merge | 1.5M atomics / iteration |
 | 5 | `compute_distance()` | `nowait` on `omp for` | Unnecessary barrier stall |
-| 6 | `Cluster.h` | `add_batch()` without atomics | Supports Fix 4 |
+| 6 | `init_point()` / `compute_distance()` | `schedule(guided)` | Load imbalance on P/E hybrid architectures |
+| 7 | `Cluster.h` | `add_batch()` without atomics | Supports Fix 4 |
