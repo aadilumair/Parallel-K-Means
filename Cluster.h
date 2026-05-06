@@ -37,6 +37,14 @@ public:
         size++;
     }
 
+    // Batch-add pre-accumulated thread-local sums (no atomics needed).
+    // Called from a critical section, so thread-safety is guaranteed by the caller.
+    void add_batch(double sum_x, double sum_y, int count) {
+        new_x_coord += sum_x;
+        new_y_coord += sum_y;
+        size += count;
+    }
+
     void free_point(){
         this->size = 0;
         this->new_x_coord = 0;
