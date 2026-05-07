@@ -92,7 +92,7 @@ vector<Point> init_point(int num_point) {
         // deterministic per-thread and there is no contention on rand().
         unsigned int seed = (unsigned int)omp_get_thread_num();
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (int i = 0; i < num_point; i++) {
             points[i] = Point(rand_r(&seed) % (int)max_range,
                               rand_r(&seed) % (int)max_range);
@@ -128,8 +128,8 @@ vector<Cluster> init_cluster(int num_cluster) {
 
 void compute_distance(vector<Point> &points, vector<Cluster> &clusters) {
 
-    unsigned long points_size   = points.size();
-    unsigned long clusters_size = clusters.size();
+    int points_size   = (int)points.size();
+    int clusters_size = (int)clusters.size();
 
 #pragma omp parallel
     {
@@ -138,35 +138,37 @@ void compute_distance(vector<Point> &points, vector<Cluster> &clusters) {
         vector<double> thr_sum_y(clusters_size, 0.0);
         vector<int>    thr_count(clusters_size, 0);
 
-        double min_distance;
-        int    min_index;
-
-        // nowait: threads that finish their chunk proceed straight to the
-        // critical merge without waiting for slower threads, overlapping
-        // the merge cost with remaining work.
-#pragma omp for schedule(static) nowait
-        for (int i = 0; i < (int)points_size; i++) {
+        // FIX 6: Inline squared-distance comparison — eliminates sqrt() from
+        // the 500k × 20 inner loop without any type conversion or heap allocation.
+        // Comparing dist² gives the same nearest-cluster result as comparing dist.
+        // No float arrays: benchmark compiles with -O2 (no AVX autovectorization),
+        // so double→float conversion would add overhead with zero SIMD benefit.
+#pragma omp for schedule(guided) nowait
+        for (int i = 0; i < points_size; i++) {
 
             Point &point = points[i];
+            double px = point.get_x_coord();
+            double py = point.get_y_coord();
 
-            min_distance = euclidean_dist(point, clusters[0]);
-            min_index    = 0;
+            double min_dist2 = 1e300;
+            int    min_index = 0;
 
-            for (int j = 1; j < (int)clusters_size; j++) {
+            for (int j = 0; j < clusters_size; ++j) {
+                double dx    = px - clusters[j].get_x_coord();
+                double dy    = py - clusters[j].get_y_coord();
+                double dist2 = dx * dx + dy * dy;   // no sqrt
 
-                double distance = euclidean_dist(point, clusters[j]);
-
-                if (distance < min_distance) {
-                    min_distance = distance;
-                    min_index    = j;
+                if (dist2 < min_dist2) {
+                    min_dist2 = dist2;
+                    min_index = j;
                 }
             }
 
             point.set_cluster_id(min_index);
 
             // Local accumulation — NO shared-memory writes in the hot path.
-            thr_sum_x[min_index] += point.get_x_coord();
-            thr_sum_y[min_index] += point.get_y_coord();
+            thr_sum_x[min_index] += px;
+            thr_sum_y[min_index] += py;
             thr_count[min_index]++;
         }
 
@@ -174,7 +176,7 @@ void compute_distance(vector<Point> &points, vector<Cluster> &clusters) {
         // add_batch() has no atomics; the critical directive is sufficient.
 #pragma omp critical
         {
-            for (int c = 0; c < (int)clusters_size; c++) {
+            for (int c = 0; c < clusters_size; c++) {
                 if (thr_count[c] > 0) {
                     clusters[c].add_batch(thr_sum_x[c], thr_sum_y[c], thr_count[c]);
                 }
