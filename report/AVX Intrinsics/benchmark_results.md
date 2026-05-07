@@ -1,6 +1,6 @@
 # K-Means Parallel Benchmark Report
 
-> **Generated:** 2026-05-06 21:09:17  
+> **Generated:** 2026-05-07 12:17:32  
 > **Host:** aadil-umair-Nitro-ANV15-51  
 > **Distro:** Ubuntu 24.04.1 LTS (WSL2)
 
@@ -40,9 +40,9 @@
 | Logical CPUs    | 12                                   |
 | Sockets         | 1                                    |
 | Threads/Core    | 2                                    |
-| Current MHz     | 1140.139                             |
-| Max MHz         | 3500.000                             |
-| Min MHz         | 399.569                              |
+| Current MHz     | 756.126                              |
+| Max MHz         | 800.362                              |
+| Min MHz         | 764.769                              |
 | L1d Cache       | 320 KiB                              |
 | L1i Cache       | 384 KiB                              |
 | L2 Cache        | 7 MiB                                |
@@ -57,16 +57,16 @@
 | Property   | Value     |
 |------------|-----------|
 | Total RAM  | 15.33 GiB |
-| Available  | 9.15 GiB  |
-| Free       | 5.42 GiB  |
-| Buffers    | 0.12 GiB  |
-| Cached     | 3.89 GiB  |
+| Available  | 11.20 GiB |
+| Free       | 8.44 GiB  |
+| Buffers    | 0.18 GiB  |
+| Cached     | 3.54 GiB  |
 | Swap Total | 7.81 GiB  |
 | Swap Free  | 7.81 GiB  |
 
 ```
 total        used        free      shared  buff/cache   available
-Mem:            15Gi       6.2Gi       5.4Gi       991Mi       4.2Gi       9.1Gi
+Mem:            15Gi       4.1Gi       8.5Gi       1.0Gi       3.8Gi        11Gi
 Swap:          7.8Gi          0B       7.8Gi
 ```
 
@@ -79,7 +79,7 @@ Swap:          7.8Gi          0B       7.8Gi
 | VRAM Total      | 6144 MiB   |
 | VRAM Free       | 5933 MiB   |
 | Driver Version  | 535.183.01 |
-| Temperature     | 37 °C      |
+| Temperature     | 49 °C      |
 | GPU Utilization | 0 %        |
 | Clock           | 1432 MHz   |
 | Max Clock       | 2100 MHz   |
@@ -101,8 +101,8 @@ Swap:          7.8Gi          0B       7.8Gi
 main_sequential.cpp:193:11: warning: ignori |
 | main_parallel.cpp          | ✅ Success | main_parallel.cpp: In function ‘void draw_chart_gnu(std::vector<Point>&)’:
 main_parallel.cpp:214:11: warning: ignoring r |
-| main_parallel_improved.cpp | ✅ Success | main_parallel_improved.cpp: In function ‘void compute_distance(std::vector<Point>&, std::vector<Cluster>&)’:
-main_parall |
+| main_parallel_improved.cpp | ✅ Success | main_parallel_improved.cpp: In function ‘void draw_chart_gnu(std::vector<Point>&)’:
+main_parallel_improved.cpp:221:11: w |
 
 > **Compile flags:** `g++ -O2 -fopenmp -I.`
 
@@ -116,11 +116,11 @@ main_parall |
 | Clusters           | 20             | 20           | 20                |
 | Iterations         | 20             | 20           | 20                |
 | OMP Processors     | 1 (sequential) | 12           | 12                |
-| Init Time (s)      | 0.024956       | 0.034235     | 0.005698          |
-| **Total Time (s)** | **0.332303**   | **0.669233** | **0.073431**      |
-| Iter Time (s)      | 0.016615       | 0.033462     | 0.003672          |
-| Wall Time (s)      | 0.92           | 1.24         | 0.64              |
-| Speedup vs Seq     | 1.00x          | 0.50x        | 4.53x             |
+| Init Time (s)      | 0.064263       | 0.085752     | 0.006619          |
+| **Total Time (s)** | **0.554438**   | **1.101913** | **0.102312**      |
+| Iter Time (s)      | 0.027722       | 0.055096     | 0.005116          |
+| Wall Time (s)      | 1.58           | 2.16         | 1.30              |
+| Speedup vs Seq     | 1.00x          | 0.50x        | 5.42x             |
 
 ---
 
@@ -144,7 +144,7 @@ Creating points..
 Points initialized 
 Creating clusters..
 Clusters initialized 
-Points and clusters generated in: 0.024956 seconds
+Points and clusters generated in: 0.064263 seconds
 Starting iterate..
 Iteration 1 done 
 Iteration 2 done 
@@ -166,7 +166,7 @@ Iteration 17 done
 Iteration 18 done 
 Iteration 19 done 
 Iteration 20 done 
-Number of iterations: 20, total time: 0.332303 seconds, time per iteration: 0.016615 seconds
+Number of iterations: 20, total time: 0.554438 seconds, time per iteration: 0.027722 seconds
 Drawing the chart...
 ```
 
@@ -181,7 +181,7 @@ Creating points..
 Creating clusters..
 Clusters initialized 
 Points initialized 
-Points and clusters generated in: 0.034235 seconds
+Points and clusters generated in: 0.085752 seconds
 Starting iterate...
 Iteration 1 done 
 Iteration 2 done 
@@ -203,7 +203,7 @@ Iteration 17 done
 Iteration 18 done 
 Iteration 19 done 
 Iteration 20 done 
-Number of iterations: 20, total time: 0.669233 seconds, time per iteration: 0.033462 seconds
+Number of iterations: 20, total time: 1.101913 seconds, time per iteration: 0.055096 seconds
 Drawing the chart...
 ```
 
@@ -218,7 +218,7 @@ Creating points..
 Points initialized
 Creating clusters..
 Clusters initialized
-Points and clusters generated in: 0.005698 seconds
+Points and clusters generated in: 0.006619 seconds
 Starting iterate...
 Iteration 1 done
 Iteration 2 done
@@ -240,7 +240,7 @@ Iteration 17 done
 Iteration 18 done
 Iteration 19 done
 Iteration 20 done
-Number of iterations: 20, total time: 0.073431 seconds, time per iteration: 0.003672 seconds
+Number of iterations: 20, total time: 0.102312 seconds, time per iteration: 0.005116 seconds
 Drawing the chart...
 ```
 

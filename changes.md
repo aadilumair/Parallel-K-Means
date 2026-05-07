@@ -176,17 +176,37 @@ No atomics are needed here because `add_batch` is only ever called from inside a
 Speedup 5.2623x
 ---
 
-## Fix 6 — AVX2 Intrinsics Vectorization (`_mm256_sub_ps` / `_mm256_mul_ps`)
+## Fix 6 — Inlined Squared-Distance (no `sqrt`, no type conversion)
 
-### Problem
-Calculating the distance between each point and every cluster requires multiple subtractions, multiplications, and an addition inside the tightest inner loop. In standard C++, the compiler might not autovectorize this optimally, leading to scalar execution where only one dimension of one cluster is processed per instruction.
+### What was tried and why it regressed (4.3x → 4.3x)
 
-### Fix
-Manually implemented vectorization using **AVX2 Intrinsics**, which are supported efficiently on both Performance (P) and Efficiency (E) cores on modern hybrid chips (where AVX-512 is often disabled).
+Two previous attempts both caused a regression from 5.2x → 4.3x:
 
-- Coordinates are first cast and packed into contiguous arrays of `float`.
-- The inner loop computes squared differences (`dx^2`, `dy^2`) and sums them for **8 clusters simultaneously** using 256-bit SIMD registers.
-- Finding the nearest cluster is done by extracting the 8 computed distances and finding the minimum. The `sqrt` was omitted because comparing squared distances guarantees the same minimum, yielding further optimization.
+| Attempt | Problem |
+|---|---|
+| Manual `_mm256_storeu_ps` + scalar scan | **Store-to-load forwarding stall** — writing SIMD results to memory then immediately reading back caused a multi-cycle pipeline stall every 8 clusters |
+| `float cx[]/cy[]` arrays + compiler autovectorization | **Benchmark compiles with `-O2 -fopenmp`** (not `-O3 -mavx2`), so no autovectorization fires — double→float conversion for 500k points per iteration added overhead with zero SIMD benefit |
+
+The benchmark compile command (from `run_benchmark.py` line 316):
+```python
+f"g++ -O2 -fopenmp -I. '{src}' -o '{out_path}'"
+```
+
+### Final Fix
+
+Remove all type conversions and heap allocations. Keep the one optimization that works at **any** optimization level: **comparing squared distances instead of actual distances**, eliminating `sqrt()` from 500,000 × 20 = 10 million inner-loop calls per iteration.
+
+```cpp
+// Before (euclidean_dist used sqrt + pow):
+double distance = sqrt(pow(px - cx, 2) + pow(py - cy, 2));  // expensive
+
+// After — same nearest-cluster result, no sqrt:
+double dist2 = dx * dx + dy * dy;   // dist² preserves ordering
+```
+
+Also: cluster coords are now read directly from `clusters[j]`, avoiding two separate heap-allocated float vectors that were being constructed and destroyed every `compute_distance()` call (20 times total).
+
+Speedup: 5.4191x
 
 ---
 
@@ -200,5 +220,5 @@ Manually implemented vectorization using **AVX2 Intrinsics**, which are supporte
 | 4 | `compute_distance()` | Thread-local reduction + `omp critical` merge | 1.5M atomics / iteration |
 | 5 | `compute_distance()` | `nowait` on `omp for` | Unnecessary barrier stall |
 | 6 | `init_point()` / `compute_distance()` | `schedule(guided)` | Load imbalance on P/E hybrid architectures |
-| 7 | `compute_distance()` | AVX2 Intrinsics (`_mm256_sub_ps`) | Scalar computation bottlenecks in inner loop |
+| 7 | `compute_distance()` | Inlined `dx*dx + dy*dy` instead of `sqrt(pow(...))` | `sqrt` + `pow` overhead in 10M inner-loop calls/iter |
 | 8 | `Cluster.h` | `add_batch()` without atomics | Supports Fix 4 |
