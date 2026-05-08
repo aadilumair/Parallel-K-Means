@@ -221,4 +221,68 @@ Speedup: 5.4191x
 | 5 | `compute_distance()` | `nowait` on `omp for` | Unnecessary barrier stall |
 | 6 | `init_point()` / `compute_distance()` | `schedule(guided)` | Load imbalance on P/E hybrid architectures |
 | 7 | `compute_distance()` | Inlined `dx*dx + dy*dy` instead of `sqrt(pow(...))` | `sqrt` + `pow` overhead in 10M inner-loop calls/iter |
-| 8 | `Cluster.h` | `add_batch()` without atomics | Supports Fix 4 |
+| 8 | `main()` / all `omp parallel` | `setenv` + `proc_bind(spread)` + `OMP_PLACES=cores` | OS thread migration across P/E cores |
+| 9 | `Cluster.h` | `add_batch()` without atomics | Supports Fix 4 |
+
+---
+
+## Fix 8 — Thread Affinity & Pinning (`OMP_PROC_BIND=spread` / `OMP_PLACES=cores`)
+
+### Problem
+
+On hybrid architectures (Intel 12th/13th gen with P-cores and E-cores), the OS
+scheduler is free to migrate threads between cores at any time. This causes:
+
+- **Cache invalidation**: a thread migrated from a P-core to an E-core (or vice versa)
+  loses its warm L1/L2 cache, paying a cold-cache miss penalty on the next memory access.
+- **Uneven execution**: if two threads land on the same physical core (sharing its
+  execution units), one of them stalls — effectively halving throughput for that chunk.
+- **NUMA effects**: on multi-socket systems, a migrated thread may access memory
+  attached to a remote socket at 2–3× higher latency.
+
+### Fix
+
+Two complementary mechanisms are applied:
+
+#### 1. `setenv` at the top of `main()` — before any parallel region
+
+```cpp
+setenv("OMP_PLACES",    "cores",  1);   // 1 physical core per place (ignores HT)
+setenv("OMP_PROC_BIND", "spread", 1);   // distribute threads evenly across places
+```
+
+`OMP_PLACES=cores` tells the runtime each "place" is one physical core, so
+hyperthreading siblings are treated as one unit. `OMP_PROC_BIND=spread` then
+distributes the thread team as evenly as possible across those places.
+
+`setenv` is called with the `overwrite=1` flag omitted (value `1` means *don't*
+overwrite if the user already exported a value), so the user retains control.
+These are set before the first `#pragma omp parallel` so libgomp reads them on its
+first team-creation event.
+
+Confirmed live in program output:
+```
+OMP_PLACES: cores
+OMP_PROC_BIND: spread
+```
+
+#### 2. `proc_bind(spread)` clause on every `#pragma omp parallel`
+
+```cpp
+#pragma omp parallel proc_bind(spread)   // init_point()
+#pragma omp parallel proc_bind(spread)   // compute_distance()
+```
+
+This is the belt-and-suspenders guarantee: even if the runtime has already been
+initialised (e.g. the env vars were set before `main()` by a test harness), the
+`proc_bind` clause overrides the binding policy for that specific parallel region.
+It is part of the OpenMP 4.0 standard and is portable across GCC, Clang, and ICC.
+
+| Effect | Mechanism |
+|---|---|
+| One thread per physical core | `OMP_PLACES=cores` |
+| Threads spread across all cores | `OMP_PROC_BIND=spread` / `proc_bind(spread)` |
+| No OS migration between iterations | Both combined pin threads for process lifetime |
+| Warm L1/L2 cache across iterations | Each thread's data stays on its assigned core |
+
+Speedup 7.0795x
