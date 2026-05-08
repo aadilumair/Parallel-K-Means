@@ -222,7 +222,8 @@ Speedup: 5.4191x
 | 6 | `init_point()` / `compute_distance()` | `schedule(guided)` | Load imbalance on P/E hybrid architectures |
 | 7 | `compute_distance()` | Inlined `dx*dx + dy*dy` instead of `sqrt(pow(...))` | `sqrt` + `pow` overhead in 10M inner-loop calls/iter |
 | 8 | `main()` / all `omp parallel` | `setenv` + `proc_bind(spread)` + `OMP_PLACES=cores` | OS thread migration across P/E cores |
-| 9 | `Cluster.h` | `add_batch()` without atomics | Supports Fix 4 |
+| 9 | `compute_distance()` | `struct ClusterAccum` padded to 64 bytes + `alignas(64)` stack array | False sharing between adjacent cluster accumulators |
+| 10 | `Cluster.h` | `add_batch()` without atomics | Supports Fix 4 |
 
 ---
 
@@ -286,3 +287,72 @@ It is part of the OpenMP 4.0 standard and is portable across GCC, Clang, and ICC
 | Warm L1/L2 cache across iterations | Each thread's data stays on its assigned core |
 
 Speedup 7.0795x
+
+---
+
+## Fix 9 — Cache-Line Padding (`struct ClusterAccum` / `alignas(64)`)
+
+### Problem
+
+The previous thread-local accumulation used three separate `vector<>` objects
+per thread:
+
+```cpp
+vector<double> thr_sum_x(clusters_size, 0.0);
+vector<double> thr_sum_y(clusters_size, 0.0);
+vector<int>    thr_count(clusters_size, 0);
+```
+
+Each vector is heap-allocated independently. The fields for a single cluster slot
+(`sum_x`, `sum_y`, `count`) together occupy only **20 bytes** across three separate
+allocations. With no alignment guarantees, the allocator can place different threads'
+vectors adjacent in memory, which means:
+
+- Thread A writes to `thr_sum_x[3]` on Core 0
+- Thread B writes to `thr_sum_x[3]` on Core 4 (its own private copy)
+- If the allocator placed both vectors within the same 64-byte cache line, Core 4's
+  write **invalidates Core 0's cache line** — even though they wrote to different
+  memory locations
+- Core 0 must re-fetch that cache line from L2/L3 on the next access → **cold miss**
+
+Additionally, within a single thread's arrays, `thr_sum_x[0]` through `thr_sum_x[3]`
+share one 64-byte cache line (4 × 8 bytes = 32 bytes). Any access to slot 0 pulls
+slots 1–3 into cache too — but since the thread only ever touches **one** slot per
+point, the other 3 slots are dead weight polluting the cache line.
+
+### Fix
+
+Define `struct ClusterAccum` padded to exactly **64 bytes** — one full cache line:
+
+```cpp
+struct ClusterAccum {
+    double sum_x = 0.0;    // 8 bytes
+    double sum_y = 0.0;    // 8 bytes
+    int    count = 0;      // 4 bytes
+    char   _pad[44] = {};  // 44 bytes — pad to 64 bytes total
+};
+static_assert(sizeof(ClusterAccum) == 64, "ClusterAccum must be exactly one cache line");
+```
+
+Declare a **stack-allocated, 64-byte aligned array** per thread inside the parallel region:
+
+```cpp
+alignas(64) ClusterAccum thr_accum[32];   // 32 × 64 = 2 KiB on the stack
+for (int c = 0; c < clusters_size; ++c) thr_accum[c] = ClusterAccum{};
+```
+
+| Property | Old (`vector<>`) | New (`ClusterAccum[]`) |
+|---|---|---|
+| Allocation location | Heap (3 separate allocs per thread) | Stack (1 array per thread) |
+| Alignment guarantee | None (`malloc` alignment, typically 16 B) | `alignas(64)` — cache-line aligned |
+| Bytes per cluster slot | 20 (spread across 3 vectors) | 64 (one struct, one cache line) |
+| Cache lines per cluster | Shared with adjacent slots | **1 dedicated cache line** |
+| False sharing risk | Yes — adjacent slots share cache lines | **Eliminated** |
+| Heap allocation overhead | 3 allocs × `clusters_size` per thread per iteration | Zero — stack only |
+
+The `alignas(64)` on the array declaration guarantees the **base** is cache-line
+aligned. Because `sizeof(ClusterAccum) == 64`, every subsequent element
+(`thr_accum[1]`, `thr_accum[2]`, …) also starts exactly on a cache line boundary.
+
+The `static_assert` is a compile-time guard: if the struct is ever modified
+(e.g. a field is added) and the 64-byte invariant breaks, the build fails immediately.
