@@ -5,6 +5,7 @@
 #include "Point.h"
 #include "Cluster.h"
 #include <omp.h>
+#include <cstdlib>     // setenv — for OMP_PLACES / OMP_PROC_BIND
 
 using namespace std;
 using namespace std::chrono;
@@ -23,9 +24,20 @@ void draw_chart_gnu(vector<Point> &points);
 
 int main() {
 
+    // FIX 7: Thread Affinity & Pinning
+    // Set before ANY omp parallel region so libgomp reads them on first team
+    // creation. OMP_PLACES=cores → one place per physical core (ignores HT
+    // siblings). OMP_PROC_BIND=spread → distribute threads across all places
+    // evenly, preventing the OS from migrating threads between P-cores and
+    // E-cores and eliminating the associated cold-cache penalties.
+    setenv("OMP_PLACES",    "cores",  1);   // 1 = don't overwrite if already set
+    setenv("OMP_PROC_BIND", "spread", 1);
+
     printf("Number of points %d\n", num_point);
     printf("Number of clusters %d\n", num_cluster);
     printf("Number of processors: %d\n", omp_get_num_procs());
+    printf("OMP_PLACES: %s\n",    getenv("OMP_PLACES")    ? getenv("OMP_PLACES")    : "(not set)");
+    printf("OMP_PROC_BIND: %s\n", getenv("OMP_PROC_BIND") ? getenv("OMP_PROC_BIND") : "(not set)");
 
     srand(int(time(NULL)));
 
@@ -86,7 +98,9 @@ vector<Point> init_point(int num_point) {
 
     vector<Point> points(num_point);
 
-#pragma omp parallel
+    // FIX 7: proc_bind(spread) — enforce spread binding in the init region too.
+    // env vars are already set; the clause is a belt-and-suspenders guarantee.
+#pragma omp parallel proc_bind(spread)
     {
         // Each thread gets its own seed derived from its ID so results are
         // deterministic per-thread and there is no contention on rand().
@@ -115,28 +129,25 @@ vector<Cluster> init_cluster(int num_cluster) {
     return clusters;
 }
 
-// FIX 2: Thread-local reduction — eliminates per-point atomic contention.
-//
-// main_parallel.cpp calls clusters[min_index].add_point(point) inside the
-// parallel loop, which fires 3 omp atomics for EVERY one of the 500 000
-// points per iteration (= 1 500 000 atomic ops / iteration).
-//
-// Here each thread accumulates into its own private arrays (zero contention)
-// and merges into the shared Cluster objects exactly ONCE per thread via a
-// short critical section (= num_threads * num_clusters ops / iteration).
-// That is a ~3 000x reduction in synchronisation cost.
-
 void compute_distance(vector<Point> &points, vector<Cluster> &clusters) {
 
     int points_size   = (int)points.size();
     int clusters_size = (int)clusters.size();
 
-#pragma omp parallel
+    // FIX 7: proc_bind(spread) — same affinity policy as the init region.
+#pragma omp parallel proc_bind(spread)
     {
-        // Thread-private accumulation arrays — allocated on the stack.
-        vector<double> thr_sum_x(clusters_size, 0.0);
-        vector<double> thr_sum_y(clusters_size, 0.0);
-        vector<int>    thr_count(clusters_size, 0);
+        // FIX 9: Stack-allocated SoA (Structure of Arrays) accumulators.
+        // Previously, vector<double> allocated on the heap, which could cause 
+        // inter-thread false sharing if different threads' vectors landed on the same 
+        // cache line. By allocating simple C-arrays on the thread's stack, we guarantee 
+        // they are separated by megabytes (no inter-thread false sharing).
+        // Furthermore, using SoA (separate arrays) keeps spatial locality high, unlike 
+        // padding each cluster to 64 bytes which bloated the L1 cache footprint and 
+        // caused a regression.
+        double thr_sum_x[32] = {0};
+        double thr_sum_y[32] = {0};
+        int    thr_count[32] = {0};
 
         // FIX 6: Inline squared-distance comparison — eliminates sqrt() from
         // the 500k × 20 inner loop without any type conversion or heap allocation.
@@ -166,7 +177,7 @@ void compute_distance(vector<Point> &points, vector<Cluster> &clusters) {
 
             point.set_cluster_id(min_index);
 
-            // Local accumulation — NO shared-memory writes in the hot path.
+            // Local accumulation — dense stack arrays give perfect spatial locality.
             thr_sum_x[min_index] += px;
             thr_sum_y[min_index] += py;
             thr_count[min_index]++;
